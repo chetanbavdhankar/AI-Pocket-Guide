@@ -1671,6 +1671,7 @@
         <button class="tab-btn" onclick="switchTab('llm','ft')">Fine-tuning</button>
         <button class="tab-btn" onclick="switchTab('llm','gen')">Generation & Sampling</button>
         <button class="tab-btn" onclick="switchTab('llm','pipeline')">Full Pipeline</button>
+        <button class="tab-btn" onclick="switchTab('llm','frontier')">Scaling & Reasoning</button>
       </div>
 
       <!-- TAB: Architecture -->
@@ -1793,7 +1794,20 @@
             <td>Translation, summarization, seq2seq</td>
             <td>Cross-attention bridges encoder/decoder</td>
           </tr>
+          <tr>
+            <td>Decoder + MoE</td>
+            <td>Mixtral, DeepSeek-V3, Qwen3-MoE, GPT-4 (rumored)</td>
+            <td>Frontier scale at modest inference cost</td>
+            <td>Dense FFN → routed experts; total ≫ active params</td>
+          </tr>
+          <tr>
+            <td>SSM / Hybrid</td>
+            <td>Mamba, Jamba, Falcon-Mamba</td>
+            <td>Very long sequences, linear-time inference</td>
+            <td>Replaces/interleaves attention; O(n) not O(n²)</td>
+          </tr>
         </table>
+        <div class="insight green"><strong>State Space Models (Mamba)</strong>: a non-attention sequence mixer that scales <em>linearly</em> with sequence length and keeps a fixed-size recurrent state instead of a growing KV cache. The selectivity mechanism (input-dependent state transitions) is what closed most of the quality gap with attention. Pure SSMs underperform on tasks needing precise recall, so production designs (Jamba) are <strong>hybrids</strong> — a few full-attention layers for copying/recall, SSM layers for cheap long-range mixing.</div>
       </div>
 
       <!-- TAB: Attention & Positional -->
@@ -3076,6 +3090,131 @@
           </tr>
         </table>
 
+      </div>
+
+      <!-- TAB: Scaling & Reasoning -->
+      <div id="llm-frontier" class="tab-content">
+        <h3 class="subsection">Scaling Laws</h3>
+        <div class="formula">L(N, D) ≈ L∞ + (Nc / N)^αN + (Dc / D)^αD</div>
+        <p>Loss falls as a smooth <strong>power law</strong> in parameters (N), data (D), and compute (C) across many orders of magnitude — the empirical bedrock that made "just scale it" a rational bet. The practical question is how to split a fixed compute budget between bigger model and more data.</p>
+        <table class="comp-table">
+          <tr>
+            <th>Regime</th>
+            <th>Prescription</th>
+            <th>Consequence</th>
+          </tr>
+          <tr>
+            <td>Kaplan et al. 2020</td>
+            <td>Spend most budget on params</td>
+            <td>Led to under-trained giants (GPT-3 175B)</td>
+          </tr>
+          <tr>
+            <td>Chinchilla 2022</td>
+            <td>Scale N and D equally: ~20 tokens per param</td>
+            <td>70B Chinchilla beat 280B Gopher</td>
+          </tr>
+          <tr>
+            <td>Inference-aware (current)</td>
+            <td>Over-train small models far past 20:1</td>
+            <td>LLaMA-3 8B on 15T tokens (~1800:1) — cheaper to serve</td>
+          </tr>
+        </table>
+        <div class="insight yellow"><strong>Compute rule of thumb</strong>: training FLOPs ≈ <span class="inline-code">6 · N · D</span> (forward+backward, per token). This single equation is how labs price a run before committing GPUs. The modern twist: Chinchilla is <em>training</em>-optimal, but if a model serves billions of tokens, deliberately over-training a smaller model wins on <strong>total</strong> lifetime cost.</div>
+        <div class="insight"><strong>The data wall</strong>: high-quality public text is finite (~tens of trillions of tokens). Frontier scaling is shifting from "more tokens" to synthetic data, multi-epoch training, and — increasingly — spending compute at <em>inference</em> instead of training (see Reasoning Models below).</div>
+
+        <h3 class="subsection">Emergent Abilities</h3>
+        <div class="insight green">Some capabilities (multi-step arithmetic, instruction following, in-context reasoning) appear <strong>abruptly</strong> past a scale threshold rather than improving smoothly — "more is different." This is why labs kept scaling even when small-model performance looked flat.</div>
+        <div class="insight"><strong>The contested part</strong>: Schaeffer et al. argued many "emergent jumps" are artifacts of <em>discontinuous metrics</em> (exact-match accuracy). Swap to a smooth metric (token-level likelihood) and the curve is gradual. Practical takeaway: emergence is real for the metrics users care about, but it's partly a measurement choice, not pure magic.</div>
+
+        <h3 class="subsection">In-Context Learning (ICL)</h3>
+        <p>The model learns a task from examples placed in the prompt, with <strong>zero weight updates</strong>. The "learning" is a forward pass conditioning on the demonstrations — gradients never move.</p>
+        <table class="comp-table">
+          <tr>
+            <th>Mode</th>
+            <th>Prompt contains</th>
+            <th>When to use</th>
+          </tr>
+          <tr>
+            <td>Zero-shot</td>
+            <td>Task description only</td>
+            <td>Strong instruction-tuned models, simple tasks</td>
+          </tr>
+          <tr>
+            <td>Few-shot</td>
+            <td>k worked examples (k≈2–8)</td>
+            <td>Format steering, niche tasks, output shape control</td>
+          </tr>
+          <tr>
+            <td>Fine-tune</td>
+            <td>Nothing extra (baked into weights)</td>
+            <td>Thousands of examples, latency-sensitive, fixed task</td>
+          </tr>
+        </table>
+        <div class="insight yellow"><strong>Mechanism — induction heads</strong>: attention heads that implement the pattern "…[A][B]…[A] → predict [B]," i.e. find a prior occurrence and copy what followed. They form during a sharp phase change in training and are the leading mechanistic explanation for how ICL works at all.</div>
+
+        <h3 class="subsection">Chain-of-Thought & Reasoning Models</h3>
+        <p>Letting a model emit intermediate steps before its answer turns generation into <strong>scratch computation</strong> — depth in tokens substitutes for depth in layers. This evolved from a prompting trick into a trained behavior that defines the current frontier.</p>
+        <table class="comp-table">
+          <tr>
+            <th>Stage</th>
+            <th>What it is</th>
+            <th>Examples</th>
+          </tr>
+          <tr>
+            <td>CoT prompting</td>
+            <td>"Let's think step by step" — elicit reasoning at inference</td>
+            <td>Any base instruct model</td>
+          </tr>
+          <tr>
+            <td>Reasoning models</td>
+            <td>RL-trained to produce long internal reasoning before answering</td>
+            <td>o1/o3, DeepSeek-R1, QwQ, Gemini Thinking, Claude extended thinking</td>
+          </tr>
+          <tr>
+            <td>RL recipe</td>
+            <td>Reward correct final answers on verifiable tasks; reasoning emerges</td>
+            <td>GRPO (R1), PPO variants, RLVR</td>
+          </tr>
+        </table>
+        <div class="insight green"><strong>Test-time / inference-time compute</strong>: instead of a bigger model, spend more <em>tokens or samples</em> at generation. Levers: long CoT ("thinking tokens"), self-consistency (sample N, majority-vote), best-of-N with a verifier, and tree/beam search over reasoning steps. A small model thinking longer can beat a large model answering instantly — a second scaling axis orthogonal to parameters.</div>
+        <div class="insight"><strong>RLVR (RL from Verifiable Rewards)</strong>: the key unlock behind R1-style models. For math/code the reward is objective (did the answer/unit-test pass?), so RL can optimize reasoning directly with no reward model and no human labels — sidestepping RLHF's biggest cost and bottleneck.</div>
+        <div class="insight yellow"><strong>Engineering tradeoff</strong>: reasoning models trade latency and token cost for accuracy. They shine on math, code, and planning; they're wasteful on retrieval/formatting tasks a 7B instruct model nails in one pass. Route by task — don't pay for thinking you don't need.</div>
+
+        <h3 class="subsection">Evaluation — Metrics & Benchmarks</h3>
+        <div class="insight"><strong>Perplexity</strong> = exp(cross-entropy loss): the model's average branching factor / "surprise" per token. The standard <em>intrinsic</em> metric — lower is better, comparable only within the same tokenizer — but it correlates only loosely with downstream usefulness, which is why benchmarks exist.</div>
+        <table class="comp-table">
+          <tr>
+            <th>Benchmark</th>
+            <th>Measures</th>
+            <th>Note</th>
+          </tr>
+          <tr>
+            <td>MMLU / MMLU-Pro</td>
+            <td>Broad knowledge, 57 subjects</td>
+            <td>Saturated at top; Pro is the harder successor</td>
+          </tr>
+          <tr>
+            <td>GSM8K / MATH</td>
+            <td>Grade-school → competition math</td>
+            <td>Primary reasoning-model targets</td>
+          </tr>
+          <tr>
+            <td>HumanEval / MBPP</td>
+            <td>Code generation (pass@k)</td>
+            <td>Executable, objective grading</td>
+          </tr>
+          <tr>
+            <td>GPQA</td>
+            <td>Google-proof graduate science</td>
+            <td>Hard to contaminate; frontier discriminator</td>
+          </tr>
+          <tr>
+            <td>Chatbot Arena (Elo)</td>
+            <td>Human pairwise preference</td>
+            <td>Live, captures helpfulness/style, not just correctness</td>
+          </tr>
+        </table>
+        <div class="insight yellow"><strong>Contamination</strong>: when test items leak into training data, scores inflate without real capability gain. Mitigations: canary strings, held-out/private sets, and freshly-generated benchmarks (GPQA, LiveBench). <strong>LLM-as-judge</strong> (using a strong model to grade open-ended outputs) scales evaluation but inherits the judge's biases — position bias, verbosity bias, self-preference — so pair it with human spot-checks.</div>
       </div>
     </section>
 
